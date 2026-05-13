@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# DGL & Data
+.dgl/
+*.dgl
+*_input/
+
+# CUDA Binaries and Outputs
+roy_spectralweight
+roy_coarsening
+roy_triangleweight
+SpectralOutput/
+CoarsedGraphOutput/
+MergeParts/
+SpectralOutput/
+MergeParts/
+
+# Logs and Results
+results/
+thesis_results/
+BaselineDir/
+CoarseDir/
+*.txt
+*.csv
+!Abstract.txt
+!README.md
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
