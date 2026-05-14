@@ -183,79 +183,28 @@ if __name__ == "__main__":
 
     # --- 3. Training ---
     print(f"\nTraining on Coarsened Graph ({args.dataset})...")
-    # Update defaults for the requested experiment
-    args.batch_size = 1024
-    args.fan_out = "10,10,10"
-    args.num_layers = 3
-    
-    # Re-initialize model with 3 layers
-    model = SAGE(g_coarse.ndata["feat"].shape[1], 512, num_classes, args.num_layers).to(device)
-    
     train_start = time.time()
-    
-    # Modified training loop with Original Graph Validation
-    train_idx = g_coarse.ndata['train_mask'].nonzero().squeeze()
-    sampler = NeighborSampler([10, 10, 10])
-    train_loader = DataLoader(g_coarse, train_idx.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=True)
-    
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
-    best_val_acc = 0.0
-    
-    for epoch in range(args.epoch):
-        model.train()
-        total_loss = 0
-        for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader):
-            x = blocks[0].srcdata["feat"]
-            y = blocks[-1].dstdata["label"]
-            y_hat = model(blocks, x)
-            if is_multilabel:
-                loss = F.binary_cross_entropy_with_logits(y_hat, y.float())
-            else:
-                loss = F.cross_entropy(y_hat, y.squeeze().long())
-            opt.zero_grad(); loss.backward(); opt.step()
-            total_loss += loss.item()
-        
-        # FAST VALIDATION ON COARSENED GRAPH
-        model.eval()
-        val_idx_coarse = g_coarse.ndata["val_mask"].nonzero().squeeze()
-        val_loader_coarse = DataLoader(g_coarse, val_idx_coarse.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=False)
-        
-        ys, y_hats = [], []
-        with torch.no_grad():
-            for _, (_, _, blocks) in enumerate(val_loader_coarse):
-                ys.append(blocks[-1].dstdata["label"])
-                y_hats.append(model(blocks, blocks[0].srcdata["feat"]))
-        
-        val_preds, val_labels = torch.cat(y_hats), torch.cat(ys)
-        acc = MF.accuracy(val_preds, val_labels.squeeze(), task="multiclass", num_classes=num_classes).item()
-        
-        if acc > best_val_acc:
-            best_val_acc = acc
-            torch.save(model.state_dict(), "best_model.pt")
-            
-        print(f"Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc (Coarse): {acc:.4f}")
-    
+    best_val_acc = train(args, device, g_coarse, model, num_classes, is_multilabel)
     train_time = time.time() - train_start
 
-    # --- 4. Testing (Load Best Model) ---
-    print("\nTesting on Original Graph...")
+    # --- 4. Testing (Directly on Original Graph) ---
+    print("\nTesting on Original Graph via direct layer-wise inference...")
     test_start = time.time()
-    model.load_state_dict(torch.load("best_model.pt"))
     model.eval()
     with torch.no_grad():
-        # Full inference on ORIGINAL graph g
+        # Full inference produces predictions for every node in the original graph
         full_preds = model.inference(g, device, 4096)
         test_idx = g.ndata["test_mask"].nonzero().squeeze()
         test_preds = full_preds[test_idx.cpu()].to(device)
         test_labels = g.ndata["label"][test_idx].to(device)
-        test_acc = MF.accuracy(test_preds, test_labels.squeeze(), task="multiclass", num_classes=num_classes).item()
+        
+        # Always use Accuracy for testing
+        test_acc = MF.accuracy(test_preds, test_labels.squeeze(), task="multiclass", num_classes=num_classes)
     test_time = time.time() - test_start
 
     # --- 5. Report ---
     print("\n--- RESULTS SUMMARY ---")
-    # Safe printing of best_val_acc
-    final_val = best_val_acc.item() if torch.is_tensor(best_val_acc) else best_val_acc
-    print(f"BEST_VAL_ACC: {final_val:.4f}")
-    print(f"FINAL_TEST_ACC: {test_acc:.4f}")
+    print(f"BEST_VAL_ACC: {best_val_acc.item():.4f}")
+    print(f"FINAL_TEST_ACC: {test_acc.item():.4f}")
     print(f"TRAIN_TIME: {train_time:.4f}s")
     print(f"TEST_TIME: {test_time:.4f}s")
