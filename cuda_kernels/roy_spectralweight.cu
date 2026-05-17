@@ -264,9 +264,13 @@ int main(int argc, char* argv[]) {
     std::cout<<"Kernel time for Normalize edge weights: " << (getTime() - startNormalize) << " seconds\n";
 
     // --- CHUNKING LOGIC STARTS HERE ---
-
-    const int chunk_size = 10000000; // Process 10 million edges at a time. Adjust based on GPU memory.
+    // Reduced chunk size for better parallel execution support
+    const int chunk_size = 1000000; 
     
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    std::cout << "GPU Memory: Free=" << free_mem/(1024*1024) << "MB, Total=" << total_mem/(1024*1024) << "MB\n";
+
     // Prepare output files by clearing them first
     // const std::string spectral_dist_file = "./SpectralOutput/spectral_distances_csr.txt";
     const std::string spectral_weight_file = "./SpectralOutput/spectral_weights_csr.txt";

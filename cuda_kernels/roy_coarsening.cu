@@ -3,6 +3,12 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/fill.h>
+#include <thrust/execution_policy.h>
+#include <thrust/equal.h>
+#include <thrust/reduce.h>
+#include <thrust/functional.h>
 #include <sys/time.h>
 #include <fstream>
 #include <cstdlib>
@@ -16,17 +22,23 @@
 
 #define BLOCK_SIZE 256
 
-__global__ void matchVertices(int* xadj, int* adjncy, int* adjwgt, int* match, int* tempweight, int numVertices) {
+__global__ void matchVertices(int* xadj, int* adjncy, int* adjwgt, int* match, int* tempweight, int* splits, int numVertices) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < numVertices) {
         int start = xadj[tid];
         int end = xadj[tid + 1];
         int bestMatch = -1;
         int maxWeight = -1;
+        int mySplit = (splits != nullptr) ? splits[tid] : 0;
 
         for (int i = start; i < end; i++) {
             int neighbor = adjncy[i];
             int weight = adjwgt[i];
+            
+            // Split-aware constraint: Only match within the same split
+            int neighborSplit = (splits != nullptr) ? splits[neighbor] : 0;
+            if (mySplit != neighborSplit) continue;
+
             if (weight > maxWeight && match[neighbor] == -1) {
                 maxWeight = weight;
                 bestMatch = neighbor;
@@ -60,7 +72,7 @@ __global__ void matchVertices(int* xadj, int* adjncy, int* adjwgt, int* match, i
     }
 }
 
-__global__ void rematchVertices(int* xadj, int* adjncy, int* adjwgt, int* match, int* tempweight, int numVertices) {
+__global__ void rematchVertices(int* xadj, int* adjncy, int* adjwgt, int* match, int* tempweight, int* splits, int numVertices) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < numVertices && (match[tid] == -1 || tid != match[match[tid]])) {
         match[tid] = -1;
@@ -72,10 +84,16 @@ __global__ void rematchVertices(int* xadj, int* adjncy, int* adjwgt, int* match,
         int end = xadj[tid + 1];
         int bestMatch = -1;
         int maxWeight = -1;
+        int mySplit = (splits != nullptr) ? splits[tid] : 0;
 
         for (int i = start; i < end; i++) {
             int neighbor = adjncy[i];
             int weight = adjwgt[i];
+
+            // Split-aware constraint: Only match within the same split
+            int neighborSplit = (splits != nullptr) ? splits[neighbor] : 0;
+            if (mySplit != neighborSplit) continue;
+
             if (weight > maxWeight && match[neighbor] == -1) {
                 maxWeight = weight;
                 bestMatch = neighbor;
@@ -289,6 +307,18 @@ __global__ void resetMatch(int* match, int numVertices) {
     }
 }
 
+__global__ void updateSplit(int* old_split, int* new_split, int* cmap, int* new_ids, int num_vertices) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < num_vertices) {
+        if (cmap[tid] == tid) { // Representative
+            int new_id = new_ids[tid];
+            if (new_id != -1) {
+                new_split[new_id] = old_split[tid];
+            }
+        }
+    }
+}
+
 void readFile(const char *fileName, int *array, int size, double &readingTime) {
     struct timeval begin, end;
     gettimeofday(&begin, NULL);
@@ -332,15 +362,18 @@ int main(int argc, char *argv[]) {
     int* h_xadj = (int*)malloc(sizeof(int) * (nvtxs + 1));
     int* h_adjncy = (int*)malloc(sizeof(int) * nedges);
     int* h_weight = (int*)malloc(sizeof(int) * nedges);
+    int* h_split = (int*)malloc(sizeof(int) * nvtxs);
 
     // Read input graph files
     gettimeofday(&begin, NULL);
     std::string xadj_path = std::string(dir) + "/row.txt";
     std::string adjncy_path = std::string(dir) + "/column.txt";
-    std::string weight_path = std::string(dir) + "/input_coarsening_weights.txt"; // Assuming spectral weights are used
+    std::string weight_path = std::string(dir) + "/input_coarsening_weights.txt"; 
+    std::string split_path = std::string(dir) + "/split.txt";
     readFile(xadj_path.c_str(), h_xadj, nvtxs + 1, inputReadingTime);
     readFile(adjncy_path.c_str(), h_adjncy, nedges, inputReadingTime);
     readFile(weight_path.c_str(), h_weight, nedges, inputReadingTime);
+    readFile(split_path.c_str(), h_split, nvtxs, inputReadingTime);
     gettimeofday(&end, NULL);
     inputReadingTime += (end.tv_sec - begin.tv_sec) + (end.tv_usec - begin.tv_usec) * 1e-6;
 
@@ -348,6 +381,7 @@ int main(int argc, char *argv[]) {
     thrust::device_vector<int> d_xadj(h_xadj, h_xadj + nvtxs + 1);
     thrust::device_vector<int> d_adjncy(h_adjncy, h_adjncy + nedges);
     thrust::device_vector<int> d_adjwgt(h_weight, h_weight + nedges);
+    thrust::device_vector<int> d_split(h_split, h_split + nvtxs);
     thrust::device_vector<int> d_match(nvtxs, -1);
     thrust::device_vector<int> d_tempweight(nvtxs, -1);
     thrust::device_vector<int> d_cmap(nvtxs);
@@ -416,6 +450,7 @@ int main(int argc, char *argv[]) {
             thrust::raw_pointer_cast(d_adjwgt.data()),
             thrust::raw_pointer_cast(d_match.data()),
             thrust::raw_pointer_cast(d_tempweight.data()),
+            thrust::raw_pointer_cast(d_split.data()),
             coarsed_nvtx
         );
         cudaDeviceSynchronize();
@@ -433,6 +468,7 @@ int main(int argc, char *argv[]) {
                 thrust::raw_pointer_cast(d_adjwgt.data()),
                 thrust::raw_pointer_cast(d_match.data()),
                 thrust::raw_pointer_cast(d_tempweight.data()),
+                thrust::raw_pointer_cast(d_split.data()),
                 coarsed_nvtx
             );
             cudaDeviceSynchronize();
@@ -474,6 +510,18 @@ int main(int argc, char *argv[]) {
             temp
         );
         cudaDeviceSynchronize();
+
+        // --- Update Split for next level ---
+        thrust::device_vector<int> d_next_split(coarsed_nvtx);
+        updateSplit<<<numBlocks, blockSize>>>(
+            thrust::raw_pointer_cast(d_split.data()),
+            thrust::raw_pointer_cast(d_next_split.data()),
+            thrust::raw_pointer_cast(d_cmap.data()),
+            thrust::raw_pointer_cast(d_new_ids.data()),
+            coarsed_nvtx
+        );
+        cudaDeviceSynchronize();
+        d_split = d_next_split;
 
         match_history[pass] = d_match;
         new_ids_history[pass] = d_new_ids;

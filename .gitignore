@@ -27,8 +27,10 @@ results/
 thesis_results/
 BaselineDir/
 CoarseDir/
+LogFiles/
 *.txt
 *.csv
+*.pt
 !Abstract.txt
 !README.md
 
