@@ -1,4 +1,10 @@
 import os
+# Monkeypatch OGB to bypass download confirmation
+import ogb.utils.url
+ogb.utils.url.decide_download = lambda url: True
+
+# Disable all tqdm progress bars
+os.environ["TQDM_DISABLE"] = "1"
 
 # Set DGL backend and home directory before importing DGL to avoid permission errors on clusters
 os.environ['DGLBACKEND'] = 'pytorch'
@@ -10,6 +16,8 @@ except Exception:
     os.environ['DGL_HOME'] = os.path.join(os.getcwd(), ".dgl")
 
 import argparse, time, torch, torch.nn as nn, torch.nn.functional as F, torchmetrics.functional as MF, dgl, os, tqdm, sys
+# Suppress download progress
+os.environ['DGL_DOWNLOAD_PROGRESS'] = '0'
 import dgl.nn as dglnn
 from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborSampler
 from dgl.data import AsNodePredDataset, RedditDataset, YelpDataset, FlickrDataset, PubmedGraphDataset, CoraGraphDataset, FraudYelpDataset as LegacyFraudYelpDataset
@@ -19,33 +27,54 @@ from ogb.nodeproppred import DglNodePropPredDataset
 os.environ['DGLBACKEND'] = 'pytorch'
 
 class SAGE(nn.Module):
-    def __init__(self, in_size, hid_size, out_size, num_layers):
+    def __init__(self, in_size, hid_size, out_size, num_layers, aggregator_type="mean"):
         super().__init__()
         self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        self.res_linears = nn.ModuleList()
+        
         if num_layers == 1:
-            self.layers.append(dglnn.SAGEConv(in_size, out_size, "mean"))
+            self.layers.append(dglnn.SAGEConv(in_size, out_size, aggregator_type))
         else:
-            self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
+            # Layer 1
+            self.layers.append(dglnn.SAGEConv(in_size, hid_size, aggregator_type))
+            self.norms.append(nn.LayerNorm(hid_size))
+            self.res_linears.append(nn.Linear(in_size, hid_size))
+            
+            # Middle Layers
             for _ in range(num_layers - 2):
-                self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-            self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
+                self.layers.append(dglnn.SAGEConv(hid_size, hid_size, aggregator_type))
+                self.norms.append(nn.LayerNorm(hid_size))
+                self.res_linears.append(nn.Linear(hid_size, hid_size))
+            
+            # Output Layer
+            self.layers.append(dglnn.SAGEConv(hid_size, out_size, aggregator_type))
+            self.res_linears.append(nn.Linear(hid_size, out_size))
+            
         self.dropout = nn.Dropout(0.5)
         self.hid_size, self.out_size = hid_size, out_size
 
     def forward(self, blocks, x):
         h = x
         for l, (layer, block) in enumerate(zip(self.layers, blocks)):
+            h_res = h
             h = layer(block, h)
+            
+            # Apply Residual Connection
+            res = self.res_linears[l](h_res[:block.num_dst_nodes()])
+            h = h + res
+            
             if l != len(self.layers) - 1:
+                h = self.norms[l](h)
                 h = F.relu(h)
                 h = self.dropout(h)
         return h
 
     def inference(self, g, device, batch_size):
         """Layer-wise inference to save memory. Intermediate features stay on CPU."""
-        feat = g.ndata["feat"]
+        # Use a separate tensor for features to avoid device mismatch with g.ndata
+        feat = g.ndata['feat'].cpu()
         sampler = MultiLayerFullNeighborSampler(1)
-        # We use a DataLoader to iterate over all nodes
         dataloader = DataLoader(g, torch.arange(g.num_nodes()).to(g.device), sampler, device=device, 
                                 batch_size=batch_size, shuffle=False, drop_last=False)
         
@@ -53,18 +82,29 @@ class SAGE(nn.Module):
             out_dim = self.hid_size if l != len(self.layers) - 1 else self.out_size
             y = torch.empty(g.num_nodes(), out_dim, device="cpu")
             
-            for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader, desc=f"Inference Layer {l+1}"):
-                # Ensure indexing happens on CPU to avoid device mismatch, then move to GPU for computation
+            # Linear and Norm must be on device
+            res_lin = self.res_linears[l].to(device)
+            if l != len(self.layers) - 1:
+                norm = self.norms[l].to(device)
+            
+            for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader, desc=f"Inference Layer {l+1}", disable=not sys.stdout.isatty()):
+                # Fetch features from CPU 'feat' and move to device
                 x = feat[input_nodes.cpu()].to(device)
+                h_res = x[:blocks[0].num_dst_nodes()]
                 h = layer(blocks[0], x)
+                
+                # Apply residual
+                h = h + res_lin(h_res)
+                
                 if l != len(self.layers) - 1:
+                    h = norm(h)
                     h = F.relu(h)
                     h = self.dropout(h)
                 y[output_nodes.cpu()] = h.cpu()
             feat = y
         return y
 
-def train(args, device, g_coarse, model, num_classes, is_multilabel):
+def train(args, device, g_coarse, model, num_classes, is_multilabel, fine_tune_g=None):
     train_idx = g_coarse.ndata['train_mask'].nonzero().squeeze()
     val_idx = g_coarse.ndata['val_mask'].nonzero().squeeze()
     
@@ -72,9 +112,10 @@ def train(args, device, g_coarse, model, num_classes, is_multilabel):
     train_loader = DataLoader(g_coarse, train_idx.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(g_coarse, val_idx.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=False)
     
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
-    best_val_acc = torch.tensor(0.0).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
+    best_val_acc = 0.0
     
+    print(f"Training on Coarsened Graph for {args.epoch} epochs...")
     for epoch in range(args.epoch):
         model.train()
         total_loss = 0
@@ -99,11 +140,53 @@ def train(args, device, g_coarse, model, num_classes, is_multilabel):
                 y_hats.append(model(blocks, blocks[0].srcdata["feat"]))
         
         val_preds, val_labels = torch.cat(y_hats), torch.cat(ys)
-        acc = MF.accuracy(val_preds, val_labels.squeeze(), task="multiclass", num_classes=num_classes)
+        acc = MF.accuracy(val_preds, val_labels.squeeze(), task="multiclass", num_classes=num_classes).item()
         
-        if acc > best_val_acc: best_val_acc = acc
-        print(f"Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc: {acc.item():.4f}")
+        if acc > best_val_acc:
+            best_val_acc = acc
+            torch.save(model.state_dict(), "best_model_coarsened.pt")
+        print(f"Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc: {acc:.4f}")
+
+    # Fine-tuning on Original Graph
+    if fine_tune_g is not None and args.ft_epoch > 0:
+        print(f"\nFine-tuning on Original Graph for {args.ft_epoch} epochs...")
+        model.load_state_dict(torch.load("best_model_coarsened.pt"))
+        train_idx_orig = fine_tune_g.ndata['train_mask'].nonzero().squeeze()
+        val_idx_orig = fine_tune_g.ndata['val_mask'].nonzero().squeeze()
         
+        train_loader_orig = DataLoader(fine_tune_g, train_idx_orig.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=True)
+        val_loader_orig = DataLoader(fine_tune_g, val_idx_orig.to(device), sampler, device=device, batch_size=args.batch_size, shuffle=False)
+        
+        # Use a smaller learning rate for fine-tuning
+        opt_ft = torch.optim.Adam(model.parameters(), lr=args.lr * 0.1, weight_decay=5e-4)
+        
+        for epoch in range(args.ft_epoch):
+            model.train()
+            total_loss = 0
+            for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader_orig):
+                x = blocks[0].srcdata["feat"]
+                y = blocks[-1].dstdata["label"]
+                y_hat = model(blocks, x)
+                if is_multilabel:
+                    loss = F.binary_cross_entropy_with_logits(y_hat, y.float())
+                else:
+                    loss = F.cross_entropy(y_hat, y.squeeze().long())
+                opt_ft.zero_grad(); loss.backward(); opt_ft.step()
+                total_loss += loss.item()
+            
+            model.eval(); ys, y_hats = [], []
+            with torch.no_grad():
+                for _, (_, _, blocks) in enumerate(val_loader_orig):
+                    ys.append(blocks[-1].dstdata["label"])
+                    y_hats.append(model(blocks, blocks[0].srcdata["feat"]))
+            val_preds, val_labels = torch.cat(y_hats), torch.cat(ys)
+            acc = MF.accuracy(val_preds, val_labels.squeeze(), task="multiclass", num_classes=num_classes).item()
+            
+            if acc > best_val_acc:
+                best_val_acc = acc
+                torch.save(model.state_dict(), "best_model_coarsened.pt")
+            print(f"FT Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc (Orig): {acc:.4f}")
+            
     return best_val_acc
 
 if __name__ == "__main__":
@@ -111,9 +194,12 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="puregpu", choices=["cpu", "mixed", "puregpu"])
     parser.add_argument("--dataset", default="reddit")
     parser.add_argument("--epoch", type=int, default=100)
-    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--ft_epoch", type=int, default=0, help="Number of fine-tuning epochs on original graph")
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--hid_size", type=int, default=256)
     parser.add_argument("--fan_out", type=str, default="10,10,10")
     parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument('--path', type=str, default='/data/dgl_lab')
     args = parser.parse_args()
     args.dataset = args.dataset.strip().strip(',')
@@ -179,32 +265,76 @@ if __name__ == "__main__":
         # For mixed mode, original graph stays on CPU but we optimize its format
         g.create_formats_()
     
-    model = SAGE(g_coarse.ndata["feat"].shape[1], 256, num_classes, args.num_layers).to(device)
-
     # --- 3. Training ---
     print(f"\nTraining on Coarsened Graph ({args.dataset})...")
+    
+    # Initialize model
+    model = SAGE(g_coarse.ndata["feat"].shape[1], args.hid_size, num_classes, args.num_layers).to(device)
+    
     train_start = time.time()
-    best_val_acc = train(args, device, g_coarse, model, num_classes, is_multilabel)
+    
+    # Use the new train function which supports fine-tuning
+    best_val_acc = train(args, device, g_coarse, model, num_classes, is_multilabel, run_id, fine_tune_g=g)
+    
     train_time = time.time() - train_start
 
-    # --- 4. Testing (Directly on Original Graph) ---
-    print("\nTesting on Original Graph via direct layer-wise inference...")
+    # --- 4. Testing (Load Best Model) ---
+    print("\nTesting on Original Graph...")
     test_start = time.time()
+    ckpt_path = f"best_model_sage_{args.dataset}_{run_id}.pt"
+    if os.path.exists(ckpt_path):
+        model.load_state_dict(torch.load(ckpt_path))
     model.eval()
     with torch.no_grad():
-        # Full inference produces predictions for every node in the original graph
+        # Full inference on ORIGINAL graph g
         full_preds = model.inference(g, device, 4096)
         test_idx = g.ndata["test_mask"].nonzero().squeeze()
         test_preds = full_preds[test_idx.cpu()].to(device)
         test_labels = g.ndata["label"][test_idx].to(device)
-        
-        # Always use Accuracy for testing
-        test_acc = MF.accuracy(test_preds, test_labels.squeeze(), task="multiclass", num_classes=num_classes)
+        test_acc = MF.accuracy(test_preds, test_labels.squeeze(), task="multiclass", num_classes=num_classes).item()
     test_time = time.time() - test_start
 
     # --- 5. Report ---
+    import json
+    # Reset peak memory stats for inference reporting
+    gpu_peak = torch.cuda.max_memory_reserved(device) / (1024 ** 2)
+    
+    # Calculate simulated memory access (Edges * Layers * Features)
+    # Original Graph
+    orig_nodes = g.num_nodes()
+    orig_edges = g.num_edges()
+    # Coarsened Graph
+    coarse_nodes = g_coarse.num_nodes()
+    coarse_edges = g_coarse.num_edges()
+    
+    # Total memory accesses during training (approximate)
+    # Each edge is accessed at least twice (forward/backward) per epoch per layer
+    total_mem_access_train = coarse_edges * args.num_layers * args.epoch * 2
+    
+    result = {
+        "dataset": args.dataset,
+        "method": "ESSC_SAGE",
+        "run_id": run_id,
+        "ratio": float(coarse_nodes / orig_nodes),
+        "orig_nodes": int(orig_nodes),
+        "orig_edges": int(orig_edges),
+        "red_nodes": int(coarse_nodes),
+        "red_edges": int(coarse_edges),
+        "train_time": float(train_time),
+        "test_time": float(test_time),
+        "test_acc": float(test_acc),
+        "best_val_acc": float(best_val_acc.item() if torch.is_tensor(best_val_acc) else best_val_acc),
+        "gpu_peak_mem_mb": float(gpu_peak),
+        "total_mem_access_train": int(total_mem_access_train)
+    }
+
     print("\n--- RESULTS SUMMARY ---")
-    print(f"BEST_VAL_ACC: {best_val_acc.item():.4f}")
-    print(f"FINAL_TEST_ACC: {test_acc.item():.4f}")
-    print(f"TRAIN_TIME: {train_time:.4f}s")
-    print(f"TEST_TIME: {test_time:.4f}s")
+    print(f"BEST_VAL_ACC: {result['best_val_acc']:.4f}")
+    print(f"FINAL_TEST_ACC: {result['test_acc']:.4f}")
+    print(f"TRAIN_TIME: {result['train_time']:.4f}s")
+    print(f"TEST_TIME: {result['test_time']:.4f}s")
+    print(f"\nPRINT_RESULT: {json.dumps(result, indent=4)}")
+    
+    # Cleanup checkpoint to save space
+    if 'ckpt_path' in locals() and os.path.exists(ckpt_path):
+        os.remove(ckpt_path)

@@ -1,4 +1,10 @@
 import os
+# Monkeypatch OGB to bypass download confirmation
+import ogb.utils.url
+ogb.utils.url.decide_download = lambda url: True
+
+# Disable all tqdm progress bars
+os.environ["TQDM_DISABLE"] = "1"
 
 # Set DGL backend and home directory before importing DGL to avoid permission errors on clusters
 os.environ['DGLBACKEND'] = 'pytorch'
@@ -17,6 +23,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics.functional as MF
 import tqdm
+import sys
+# Suppress download progress
+import os
+os.environ['DGL_DOWNLOAD_PROGRESS'] = '0'
 from dgl.data import AsNodePredDataset
 from dgl.dataloading import (
     DataLoader,
@@ -83,7 +93,7 @@ class SAGE(nn.Module):
                 pin_memory=pin_memory,
             )
             feat = feat.to(device)
-            for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader):
+            for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader, disable=not sys.stdout.isatty()):
                 x = feat[input_nodes]
                 h = layer(blocks[0], x)
                 if l != len(self.layers) - 1:
@@ -233,7 +243,19 @@ if __name__ == "__main__":
     load_start_time = time.time()
 
     # Set default path for OGB/Reddit/Flickr if not provided
-    data_path = args.path if args.path else os.path.expanduser("~/.dgl")
+    # Redirect to a local writable directory if the home directory is restricted
+    if args.path:
+        data_path = args.path
+    else:
+        try:
+            if os.access(os.path.expanduser("~"), os.W_OK):
+                data_path = os.path.expanduser("~/.dgl")
+            else:
+                data_path = os.path.join(os.getcwd(), ".dgl")
+        except Exception:
+            data_path = os.path.join(os.getcwd(), ".dgl")
+    
+    print(f"--> [LOG] Data Root: {data_path}")
 
     if args.dataset.startswith('ogbn-'):
         dataset = AsNodePredDataset(DglNodePropPredDataset(name=args.dataset, root=data_path))
@@ -329,6 +351,10 @@ if __name__ == "__main__":
     load_time = time.time() - load_start_time
     print(f"Original Graph: {g}")
     print(f"Graph loading time: {load_time:.4f}s")
+
+    if args.epoch == 0:
+        print("Epoch is 0. Data loading complete. Exiting successfully.")
+        sys.exit(0)
 
     device = torch.device("cpu" if args.mode == "cpu" else "cuda")
     if args.mode == "puregpu":
