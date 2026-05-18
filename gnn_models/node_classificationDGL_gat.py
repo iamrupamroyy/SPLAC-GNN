@@ -68,6 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=4); parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument('--path', type=str, default='/data/dgl_lab'); args = parser.parse_args()
     device = torch.device("cuda" if args.mode != "cpu" else "cpu")
+    run_id = f"{int(time.time())}_{os.getpid()}"
     data_path = args.path if os.path.exists(args.path) else os.path.expanduser("~/.dgl")
     if args.dataset.startswith("ogbn-"):
         dataset = AsNodePredDataset(DglNodePropPredDataset(args.dataset, root=data_path)); g, num_classes = dataset[0], dataset.num_classes

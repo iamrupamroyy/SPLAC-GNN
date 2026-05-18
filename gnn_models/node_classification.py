@@ -104,7 +104,7 @@ class SAGE(nn.Module):
             feat = y
         return y
 
-def train(args, device, g_coarse, model, num_classes, is_multilabel, fine_tune_g=None):
+def train(args, device, g_coarse, model, num_classes, is_multilabel, run_id, fine_tune_g=None):
     train_idx = g_coarse.ndata['train_mask'].nonzero().squeeze()
     val_idx = g_coarse.ndata['val_mask'].nonzero().squeeze()
     
@@ -114,6 +114,8 @@ def train(args, device, g_coarse, model, num_classes, is_multilabel, fine_tune_g
     
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
     best_val_acc = 0.0
+    
+    ckpt_path = f"best_model_sage_{args.dataset}_{run_id}.pt"
     
     print(f"Training on Coarsened Graph for {args.epoch} epochs...")
     for epoch in range(args.epoch):
@@ -144,13 +146,13 @@ def train(args, device, g_coarse, model, num_classes, is_multilabel, fine_tune_g
         
         if acc > best_val_acc:
             best_val_acc = acc
-            torch.save(model.state_dict(), "best_model_coarsened.pt")
+            torch.save(model.state_dict(), ckpt_path)
         print(f"Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc: {acc:.4f}")
 
     # Fine-tuning on Original Graph
     if fine_tune_g is not None and args.ft_epoch > 0:
         print(f"\nFine-tuning on Original Graph for {args.ft_epoch} epochs...")
-        model.load_state_dict(torch.load("best_model_coarsened.pt"))
+        model.load_state_dict(torch.load(ckpt_path))
         train_idx_orig = fine_tune_g.ndata['train_mask'].nonzero().squeeze()
         val_idx_orig = fine_tune_g.ndata['val_mask'].nonzero().squeeze()
         
@@ -184,7 +186,7 @@ def train(args, device, g_coarse, model, num_classes, is_multilabel, fine_tune_g
             
             if acc > best_val_acc:
                 best_val_acc = acc
-                torch.save(model.state_dict(), "best_model_coarsened.pt")
+                torch.save(model.state_dict(), ckpt_path)
             print(f"FT Epoch {epoch:03d} | Loss {total_loss/(it+1):.4f} | Val Acc (Orig): {acc:.4f}")
             
     return best_val_acc
@@ -205,6 +207,7 @@ if __name__ == "__main__":
     args.dataset = args.dataset.strip().strip(',')
 
     device = torch.device("cuda" if args.mode != "cpu" else "cpu")
+    run_id = f"{int(time.time())}_{os.getpid()}"
 
     # --- Smart Path Detection ---
     server_path = "/data/dgl_lab"
