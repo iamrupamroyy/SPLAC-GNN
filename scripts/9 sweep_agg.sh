@@ -57,13 +57,13 @@ for ds in "${DATASETS[@]}"; do
                     } > "$OUTPUT_FILE"
 
                     # 1. Run Coarsening
-                    python rupam_file.py --dataset $ds -w spectral -r $RATIO \
+                    python src/gnn_models/rupam_file.py --dataset $ds -w spectral -r $RATIO \
                         --mask_agg $m_agg --feature_agg $f_agg --label_agg $l_agg \
                         --boost_h $BOOST_H --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
                     
                     # 2. Run Training (if coarsening succeeded)
                     if [ $? -eq 0 ]; then
-                        python node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH \
+                        python src/gnn_models/node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH \
                             --num_layers 2 --fan_out $FAN_OUT --batch_size $BATCH_SIZE -r $RATIO --boost_h $BOOST_H --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
                     fi
                 done

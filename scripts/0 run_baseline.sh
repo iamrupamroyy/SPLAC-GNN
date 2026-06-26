@@ -55,7 +55,7 @@ for ds in "${DATASETS[@]}"; do
         } > "$OUTPUT_FILE"
 
         # Run Classification on Original Graph
-        TRAIN_CMD="python node_classificationDGL.py --dataset $ds --mode $MODE --epoch $EPOCH --num_layers $NUM_LAYERS --fan_out $FAN_OUT --batch_size $BATCH_SIZE $EXTRA_ARGS"
+        TRAIN_CMD="python src/gnn_models/node_classificationDGL.py --dataset $ds --mode $MODE --epoch $EPOCH --num_layers $NUM_LAYERS --fan_out $FAN_OUT --batch_size $BATCH_SIZE $EXTRA_ARGS"
         
         echo "Executing Baseline Training: $TRAIN_CMD" >> "$OUTPUT_FILE"
         $TRAIN_CMD >> "$OUTPUT_FILE" 2>&1

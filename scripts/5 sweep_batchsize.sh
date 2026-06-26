@@ -46,10 +46,10 @@ for ds in "${DATASETS[@]}"; do
             EXTRA_ARGS=""
             if [ "$ds" == "igb-small" ]; then EXTRA_ARGS="--path /data/Dataset/gnn_dataset"; fi
 
-            python rupam_file.py --dataset $ds -w spectral -r $RATIO --mask_agg $MASK_AGG --feature_agg $FEAT_AGG --label_agg $LABEL_AGG --boost_h $BOOST_H --sw_max $SW_MAX --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
+            python src/gnn_models/rupam_file.py --dataset $ds -w spectral -r $RATIO --mask_agg $MASK_AGG --feature_agg $FEAT_AGG --label_agg $LABEL_AGG --boost_h $BOOST_H --sw_max $SW_MAX --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
             
             if [ $? -eq 0 ]; then
-                python node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH --num_layers 2 --fan_out $FAN_OUT --batch_size $bs -r $RATIO --boost_h $BOOST_H --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
+                python src/gnn_models/node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH --num_layers 2 --fan_out $FAN_OUT --batch_size $bs -r $RATIO --boost_h $BOOST_H --use_feature_sim $EXTRA_ARGS >> "$OUTPUT_FILE" 2>&1
             fi
         done
     done

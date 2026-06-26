@@ -73,7 +73,7 @@ for ds in "${DATASETS[@]}"; do
         } > "$OUTPUT_FILE"
 
         # 1. Run Coarsening
-        COARSEN_CMD="python rupam_file.py --dataset $ds -w spectral -r $RATIO --mask_agg $MASK_AGG --feature_agg $FEAT_AGG --label_agg $LABEL_AGG --boost_h $BOOST_H --sw_max $SW_MAX $EXTRA_ARGS"
+        COARSEN_CMD="python src/gnn_models/rupam_file.py --dataset $ds -w spectral -r $RATIO --mask_agg $MASK_AGG --feature_agg $FEAT_AGG --label_agg $LABEL_AGG --boost_h $BOOST_H --sw_max $SW_MAX $EXTRA_ARGS"
         if [ "$USE_FEATURE_SIM" = true ]; then
             COARSEN_CMD="$COARSEN_CMD --use_feature_sim"
         fi
@@ -83,7 +83,7 @@ for ds in "${DATASETS[@]}"; do
         
         if [ $? -eq 0 ]; then
             # 2. Run Classification
-            TRAIN_CMD="python node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH --ft_epoch $FT_EPOCH --num_layers 2 --fan_out $FAN_OUT --batch_size $BATCH_SIZE -r $RATIO --boost_h $BOOST_H $EXTRA_ARGS"
+            TRAIN_CMD="python src/gnn_models/node_classification.py --dataset $ds --mode $MODE --epoch $EPOCH --ft_epoch $FT_EPOCH --num_layers 2 --fan_out $FAN_OUT --batch_size $BATCH_SIZE -r $RATIO --boost_h $BOOST_H $EXTRA_ARGS"
             if [ "$USE_FEATURE_SIM" = true ]; then
                 TRAIN_CMD="$TRAIN_CMD --use_feature_sim"
             fi

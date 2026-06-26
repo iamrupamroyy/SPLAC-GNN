@@ -34,8 +34,8 @@ import dgl.graphbolt as gb
 
 # Define the names of the source files and their desired executable names
 KERNELS = {
-    "roy_spectralweight.cu": "roy_spectralweight",
-    "roy_coarsening.cu": "roy_coarsening",
+    "src/cuda_kernels/roy_spectralweight.cu": "roy_spectralweight",
+    "src/cuda_kernels/roy_coarsening.cu": "roy_coarsening",
 }
 
 # Define the output directories that the C++ programs will create
@@ -98,8 +98,8 @@ def get_processed_graphs_and_times(dataset_name, weight_type, retain_fraction, m
     OUTPUT_DGL_FILE = f"{name_for_folders}_r{retain_fraction}_h{boost_h}{feat_sim_str}.dgl"
 
     # Executables (Must be compiled from C++ files) - now reference KERNELS
-    SPECTRAL_EXE = f"./{KERNELS['roy_spectralweight.cu']}"
-    COARSENING_EXE = f"./{KERNELS['roy_coarsening.cu']}"
+    SPECTRAL_EXE = f"./{KERNELS['src/cuda_kernels/roy_spectralweight.cu']}"
+    COARSENING_EXE = f"./{KERNELS['src/cuda_kernels/roy_coarsening.cu']}"
 
     COARSE_OUTPUT_DIR = OUTPUT_DIRS[1] # "CoarsedGraphOutput"
 
